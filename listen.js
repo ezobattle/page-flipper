@@ -14,6 +14,17 @@ const Listener = {
 
   get running() { return !!this.timer; },
 
+  // Call this synchronously inside a tap handler: iPad only lets audio start from a tap.
+  unlock() {
+    try {
+      if (!this.ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AC();
+      }
+      this.ctx.resume();
+    } catch (err) { console.warn(err); }
+  },
+
   // Must be called from a tap (browsers only allow audio after a user gesture).
   async start() {
     if (this.running) return;
@@ -128,9 +139,13 @@ function centered(v) {
    It uses streaming "subsequence dynamic time warping": the cue can start at any moment, and
    it may be played anywhere from about twice as fast to much slower than when it was taught. */
 class CueMatcher {
-  constructor(cue) {
+  // earlySec: report a match this many seconds before the end of the cue (to turn early).
+  constructor(cue, earlySec = 0) {
     this.T = cue.frames.map(centered);
     this.m = this.T.length;
+    const hop = cue.hop || HOP_MS / 1000;
+    // Never fire before 40% of the cue has been heard, or it would trigger too easily.
+    this.fireAt = Math.max(Math.round(0.4 * (this.m - 1)), this.m - 1 - Math.round(earlySec / hop));
     this.D = new Float64Array(this.m).fill(Infinity); // accumulated cost ending at template frame j
     this.L = new Float64Array(this.m).fill(0);        // path length for the same
   }
@@ -173,9 +188,10 @@ class CueMatcher {
       if (avg < 0.3 && j / (m - 1) > bestProgress) { bestProgress = j / (m - 1); bestAvg = avg; }
     }
     this.D = nD; this.L = nL;
-    const endAvg = nD[m - 1] / nL[m - 1];
+    const f = this.fireAt;
+    const endAvg = nD[f] / nL[f];
     // Demand the path really covered the cue (not a single frame stretched out).
-    const covered = nL[m - 1] >= m * 0.5;
+    const covered = nL[f] >= (f + 1) * 0.5;
     return {
       similarity: covered && isFinite(endAvg) ? Math.max(0, 1 - endAvg * 2) : 0,
       progress: bestProgress,

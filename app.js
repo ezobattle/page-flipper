@@ -337,7 +337,7 @@ async function renderPages() {
     const img = document.createElement('img');
     img.src = trackedURL(page.thumb);
     img.alt = `Page ${i + 1}`;
-    img.onclick = () => openViewer(i);
+    img.onclick = () => { Listener.unlock(); openViewer(i); };
     const row = document.createElement('div');
     row.className = 'row';
     const label = document.createElement('span');
@@ -398,7 +398,7 @@ $('pieceTitle').addEventListener('input', () => {
   savePiece.t = setTimeout(savePiece, 300);
 });
 $('editorBack').onclick = async () => { await savePiece(); goLibrary(); };
-$('playBtn').onclick = () => openViewer(0);
+$('playBtn').onclick = () => { Listener.unlock(); openViewer(0); };
 
 let deleteArmed = false;
 $('deletePieceBtn').onclick = async () => {
@@ -931,6 +931,7 @@ async function openViewer(startIndex = 0) {
   keepAwake();
   renderSpread();
   flashChrome();
+  startAutoTurn();
 }
 
 function renderSpread() {
@@ -964,9 +965,11 @@ function renderSpread() {
     ? `${viewer.index + 1}–${last} / ${viewer.pages.length}`
     : `${viewer.index + 1} / ${viewer.pages.length}`;
   flashBadge();
+  armCue();
 }
 
-function turn(dir) {
+function turn(dir, auto = false) {
+  if (!auto) auto_.cooldownUntil = performance.now() + (dir < 0 ? 4000 : 1500);
   const n = perScreen();
   const next = viewer.index + dir * n;
   if (next < 0 || next >= viewer.pages.length) {
@@ -984,6 +987,121 @@ function turn(dir) {
 // Exposed so the auto-flip step can call it later.
 window.pageFlipper = { next: () => turn(1), prev: () => turn(-1) };
 
+// ---------------------------------------------------------------- auto-turn
+// While playing, listen for the taught last bar of the page on screen (the right-hand page
+// in two-page view) and turn when it's heard.
+const EARLY_OPTIONS = [
+  { sec: 0, label: 'Turn: on last note' },
+  { sec: 0.5, label: 'Turn: ½ s early' },
+  { sec: 1, label: 'Turn: 1 s early' },
+  { sec: 2, label: 'Turn: 2 s early' },
+];
+const auto_ = { unsub: null, matcher: null, cuePage: -1, cooldownUntil: 0, lastBlink: 0 };
+
+function pref(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch { return fallback; } }
+function setPref(key, v) { try { localStorage.setItem(key, v); } catch {} }
+const autoEnabled = () => pref('autoTurn', 'on') === 'on';
+const earlySec = () => Number(pref('turnEarly', '0.5'));
+
+function updateAutoButtons() {
+  $('autoBtn').textContent = `🎹 Auto-turn: ${autoEnabled() ? 'on' : 'off'}`;
+  const opt = EARLY_OPTIONS.find(o => o.sec === earlySec()) || EARLY_OPTIONS[1];
+  $('earlyBtn').textContent = opt.label;
+  $('earlyBtn').hidden = !autoEnabled();
+}
+
+async function startAutoTurn() {
+  updateAutoButtons();
+  const anyCue = viewer.pages.some(p => p.cue);
+  if (!autoEnabled() || !anyCue) { $('autoDot').hidden = true; return; }
+  try {
+    await Listener.start();
+  } catch (err) {
+    console.error(err);
+    toast(err && err.name === 'NotAllowedError'
+      ? 'Auto-turn needs the microphone. Allow it for this site in Chrome, then reopen the piece.'
+      : 'Auto-turn could not start the microphone.', 6000);
+    $('autoDot').hidden = true;
+    return;
+  }
+  if ($('viewer').hidden) { Listener.stop(); return; } // closed while we were starting
+  if (auto_.unsub) auto_.unsub();
+  auto_.unsub = Listener.subscribe(onAutoFrame);
+  $('autoDot').hidden = false;
+  armCue();
+}
+
+function stopAutoTurn() {
+  if (auto_.unsub) auto_.unsub();
+  auto_.unsub = null;
+  auto_.matcher = null;
+  auto_.cuePage = -1;
+  Listener.stop();
+  $('autoDot').hidden = true;
+}
+
+// Pick the cue for the page now on screen.
+function armCue() {
+  if (!auto_.unsub) return;
+  const n = perScreen();
+  const pageIdx = Math.min(viewer.index + n - 1, viewer.pages.length - 1);
+  const hasNext = viewer.index + n < viewer.pages.length;
+  const page = viewer.pages[pageIdx];
+  const dot = $('autoDot');
+  if (hasNext && page && page.cue) {
+    if (auto_.cuePage !== pageIdx || !auto_.matcher) {
+      auto_.matcher = new CueMatcher(page.cue, earlySec());
+      auto_.cuePage = pageIdx;
+    }
+    dot.classList.remove('quiet');
+    $('autoText').textContent = `Listening for end of page ${pageIdx + 1}`;
+  } else {
+    auto_.matcher = null;
+    auto_.cuePage = -1;
+    dot.classList.add('quiet');
+    $('autoText').textContent = hasNext ? `Page ${pageIdx + 1} not taught` : 'Last page';
+  }
+}
+
+function onAutoFrame(f) {
+  const dot = $('autoDot');
+  // The dot pulses with your playing so you can see the mic is hearing you.
+  const s = 1 + Math.max(0, Math.min(1, (f.level + 60) / 40)) * 0.6;
+  dot.querySelector('.dot').style.transform = `scale(${s.toFixed(2)})`;
+  dot.classList.toggle('on', !!auto_.matcher);
+  if (!auto_.matcher) return;
+  const r = auto_.matcher.push(f);
+  dot.classList.toggle('near', r.similarity > MATCH_THRESHOLD * 0.8);
+  if (r.similarity >= MATCH_THRESHOLD && f.t > auto_.cooldownUntil) {
+    auto_.cooldownUntil = f.t + 2500;
+    auto_.matcher = null;
+    auto_.cuePage = -1;
+    turn(1, true);
+  }
+}
+
+$('autoBtn').onclick = () => {
+  Listener.unlock();
+  setPref('autoTurn', autoEnabled() ? 'off' : 'on');
+  if (autoEnabled()) {
+    if (!viewer.pages.some(p => p.cue)) toast('No page turns taught yet. Use 🎹 Teach turns on the piece page first.', 4000);
+    startAutoTurn();
+  } else {
+    stopAutoTurn();
+    updateAutoButtons();
+  }
+  flashChrome();
+};
+$('earlyBtn').onclick = () => {
+  const i = EARLY_OPTIONS.findIndex(o => o.sec === earlySec());
+  const next = EARLY_OPTIONS[(i + 1) % EARLY_OPTIONS.length];
+  setPref('turnEarly', String(next.sec));
+  updateAutoButtons();
+  auto_.cuePage = -1; // rebuild the matcher with the new timing
+  armCue();
+  flashChrome();
+};
+
 function flashBadge() {
   const b = $('pageBadge');
   b.classList.remove('fade');
@@ -998,6 +1116,7 @@ function flashChrome() {
 }
 
 async function closeViewer() {
+  stopAutoTurn();
   releaseWake();
   exitFullscreen();
   viewer.urls.forEach(u => URL.revokeObjectURL(u));

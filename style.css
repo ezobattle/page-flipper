@@ -182,3 +182,15 @@ button:active, .button:active { transform: scale(0.97); }
 .match-hit.on { visibility: visible; }
 .teach-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 .taught { color: #2b8a3e; font-weight: 600; font-size: 13px; }
+
+/* Auto-turn indicator */
+.auto-dot {
+  position: absolute; left: calc(12px + env(safe-area-inset-left)); bottom: calc(10px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 8px; pointer-events: none;
+  background: rgba(20,20,20,.55); color: #fff; padding: 4px 10px; border-radius: 999px; font-size: 13px;
+  transition: opacity 400ms ease;
+}
+.auto-dot .dot { width: 10px; height: 10px; border-radius: 50%; background: #868e96; transition: transform 60ms linear, background 200ms; }
+.auto-dot.on .dot { background: #40c057; }
+.auto-dot.near .dot { background: #fab005; }
+.auto-dot.quiet { opacity: 0.35; }
