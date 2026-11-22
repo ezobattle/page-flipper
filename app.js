@@ -4,7 +4,7 @@
 
 // ---------------------------------------------------------------- storage
 const DB_NAME = 'pageflipper';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 
 function openDB() {
@@ -15,6 +15,10 @@ function openDB() {
         const db = req.result;
         if (!db.objectStoreNames.contains('pieces')) db.createObjectStore('pieces', { keyPath: 'id' });
         if (!db.objectStoreNames.contains('pages')) db.createObjectStore('pages', { keyPath: 'id' });
+        // Taught page turns live in their own store, keyed by page id. Page records (with their
+        // photos) are then never rewritten when a turn is taught: on iPad, re-saving a stored
+        // photo could break it.
+        if (!db.objectStoreNames.contains('cues')) db.createObjectStore('cues', { keyPath: 'id' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -40,6 +44,15 @@ const dbGet = (store, id) => tx(store, 'readonly', s => s.get(id));
 const dbAll = (store) => tx(store, 'readonly', s => s.getAll());
 const dbPut = (store, value) => tx(store, 'readwrite', s => s.put(value));
 const dbDel = (store, id) => tx(store, 'readwrite', s => s.delete(id));
+
+// A page with its taught turn (if any) attached as page.cue.
+async function getPage(id) {
+  const page = await dbGet('pages', id);
+  if (!page) return page;
+  const c = await dbGet('cues', id);
+  page.cue = c ? c.cue : undefined;
+  return page;
+}
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
@@ -331,7 +344,7 @@ async function renderPages() {
   $('playBtn').disabled = ids.length === 0;
   $('teachBtn').disabled = ids.length === 0;
   for (let i = 0; i < ids.length; i++) {
-    const page = await dbGet('pages', ids[i]);
+    const page = await getPage(ids[i]);
     if (!page) continue;
     const li = document.createElement('li');
     const img = document.createElement('img');
@@ -388,6 +401,7 @@ async function deletePage(i) {
   currentPiece.pageIds.splice(i, 1);
   await savePiece();
   await dbDel('pages', id);
+  await dbDel('cues', id);
   await renderPages();
 }
 
@@ -410,7 +424,7 @@ $('deletePieceBtn').onclick = async () => {
   }
   deleteArmed = false;
   $('deletePieceBtn').textContent = 'Delete this piece';
-  for (const id of currentPiece.pageIds) await dbDel('pages', id);
+  for (const id of currentPiece.pageIds) { await dbDel('pages', id); await dbDel('cues', id); }
   await dbDel('pieces', currentPiece.id);
   goLibrary();
 };
@@ -689,7 +703,6 @@ $('cropSave').onclick = async () => {
       blob, thumb, original: job.original,
       rotation: job.rotation, corners: job.corners, enhance: job.enhance, removeColor: job.removeColor,
       width: page.width, height: page.height,
-      cue: job.pageId ? ((await dbGet('pages', job.pageId)) || {}).cue : undefined,
     };
     await dbPut('pages', record);
     if (!job.pageId) currentPiece.pageIds.push(record.id);
@@ -729,7 +742,7 @@ async function openTeach() {
   await savePiece();
   teach.pages = [];
   for (const id of currentPiece.pageIds) {
-    const p = await dbGet('pages', id);
+    const p = await getPage(id);
     if (p) teach.pages.push(p);
   }
   if (!teach.pages.length) return;
@@ -748,9 +761,13 @@ function teachTurnCount() { return Math.max(1, teach.pages.length - 1); }
 function renderTeach() {
   const i = teach.index, page = teach.pages[i];
   const single = teach.pages.length === 1;
-  if (teach.url) URL.revokeObjectURL(teach.url);
-  teach.url = URL.createObjectURL(page.blob);
-  $('teachImg').src = teach.url;
+  // Only reload the photo when moving to another page.
+  if (teach.urlPage !== page.id) {
+    if (teach.url) URL.revokeObjectURL(teach.url);
+    teach.url = URL.createObjectURL(page.blob);
+    teach.urlPage = page.id;
+    $('teachImg').src = teach.url;
+  }
   $('teachImg').alt = `Page ${i + 1}`;
   $('teachWhich').textContent = single ? 'Page 1' : `End of page ${i + 1} → ${i + 2}`;
   const state = $('teachState');
@@ -832,7 +849,7 @@ async function finishRecording() {
   }
   const page = teach.pages[teach.index];
   page.cue = cue;
-  await dbPut('pages', page);
+  await dbPut('cues', { id: page.id, cue });
   renderTeach();
   toast(`Saved (${(cue.frames.length * cue.hop).toFixed(1)} s). Tap Test and play it again to check.`, 4000);
 }
@@ -868,7 +885,7 @@ $('forgetBtn').onclick = async () => {
   stopListening();
   const page = teach.pages[teach.index];
   delete page.cue;
-  await dbPut('pages', page);
+  await dbDel('cues', page.id);
   renderTeach();
 };
 
@@ -879,6 +896,7 @@ $('teachBack').onclick = async () => {
   Listener.stop();
   if (teach.url) URL.revokeObjectURL(teach.url);
   teach.url = null;
+  teach.urlPage = null;
   show('editor');
   await renderPages();
 };
@@ -920,7 +938,7 @@ async function openViewer(startIndex = 0) {
   await savePiece();
   viewer.pages = [];
   for (const id of currentPiece.pageIds) {
-    const p = await dbGet('pages', id);
+    const p = await getPage(id);
     if (p) viewer.pages.push(p);
   }
   if (!viewer.pages.length) return;
