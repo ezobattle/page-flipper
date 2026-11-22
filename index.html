@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Page Flipper">
+  <meta name="theme-color" content="#1d1b19">
+  <title>Page Flipper</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Library: list of pieces -->
+  <section id="library" class="view">
+    <header class="bar">
+      <h1>Page Flipper</h1>
+      <button id="newPieceBtn" class="primary">+ New piece</button>
+    </header>
+    <div id="pieceGrid" class="grid"></div>
+    <p id="emptyLibrary" class="empty" hidden>
+      No music yet. Tap <b>+ New piece</b>, then photograph each page in order.
+    </p>
+  </section>
+
+  <!-- Editor: one piece and its pages -->
+  <section id="editor" class="view" hidden>
+    <header class="bar">
+      <button id="editorBack" class="ghost">‹ Library</button>
+      <input id="pieceTitle" class="title-input" type="text" placeholder="Piece name" autocomplete="off">
+      <button id="playBtn" class="primary">▶ Play</button>
+    </header>
+    <div class="actions">
+      <label class="button">
+        📷 Take photo
+        <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
+      </label>
+      <label class="button">
+        🖼 Choose photos
+        <input id="libraryInput" type="file" accept="image/*" multiple hidden>
+      </label>
+    </div>
+    <ol id="pageList" class="pages"></ol>
+    <p id="emptyPieces" class="empty" hidden>
+      Add the first page. Lay it flat in good light and fill the frame.
+    </p>
+    <div class="danger-zone">
+      <button id="deletePieceBtn" class="danger ghost">Delete this piece</button>
+    </div>
+  </section>
+
+  <!-- Crop: drag the four corners onto the page -->
+  <section id="crop" class="view dark" hidden>
+    <header class="bar">
+      <button id="cropCancel" class="ghost">Cancel</button>
+      <span id="cropHint" class="hint">Drag the corners onto the page edges</span>
+      <button id="cropSave" class="primary">Save page</button>
+    </header>
+    <div id="cropStage" class="crop-stage">
+      <canvas id="cropCanvas"></canvas>
+    </div>
+    <footer class="bar">
+      <button id="rotateBtn" class="ghost">⟳ Rotate</button>
+      <button id="resetCornersBtn" class="ghost">Reset corners</button>
+      <label class="toggle"><input id="enhanceToggle" type="checkbox" checked> Clean up (white paper, black ink)</label>
+    </footer>
+    <div id="busy" class="busy" hidden><div class="spinner"></div><span>Straightening…</span></div>
+  </section>
+
+  <!-- Viewer: full-screen pages -->
+  <section id="viewer" class="view viewer" hidden>
+    <div id="spread" class="spread"></div>
+    <div id="viewerChrome" class="viewer-chrome">
+      <button id="viewerClose" class="ghost">‹ Done</button>
+      <span id="viewerTitle"></span>
+      <button id="layoutBtn" class="ghost">Layout</button>
+    </div>
+    <div id="pageBadge" class="page-badge"></div>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
