@@ -33,6 +33,7 @@
     <header class="bar">
       <button id="editorBack" class="ghost">‹ Library</button>
       <input id="pieceTitle" class="title-input" type="text" placeholder="Piece name" autocomplete="off">
+      <button id="teachBtn">🎹 Teach turns</button>
       <button id="playBtn" class="primary">▶ Play</button>
     </header>
     <div class="actions">
@@ -68,11 +69,46 @@
       <button id="rotateBtn" class="ghost">⟳ Rotate</button>
       <button id="resetCornersBtn" class="ghost">Reset corners</button>
       <span class="toggles">
-        <label class="toggle"><input id="enhanceToggle" type="checkbox" checked> Clean up</label>
+        <label class="toggle"><input id="enhanceToggle" type="checkbox"> Clean up</label>
         <label class="toggle"><input id="colorToggle" type="checkbox" checked> Remove colored marks</label>
       </span>
     </footer>
     <div id="busy" class="busy" hidden><div class="spinner"></div><span>Straightening…</span></div>
+  </section>
+
+  <!-- Teach: record the last bar of each page -->
+  <section id="teach" class="view teach" hidden>
+    <header class="bar">
+      <button id="teachBack" class="ghost">‹ Pages</button>
+      <h2 id="teachTitle">Teach page turns</h2>
+      <span class="spacer"></span>
+    </header>
+    <div class="teach-body">
+      <div class="teach-page"><img id="teachImg" alt=""></div>
+      <div class="teach-panel">
+        <div class="teach-nav">
+          <button id="teachPrev" aria-label="Previous page">◀</button>
+          <div>
+            <div id="teachWhich" class="teach-which"></div>
+            <div id="teachState" class="teach-state"></div>
+          </div>
+          <button id="teachNext" aria-label="Next page">▶</button>
+        </div>
+        <p id="teachHelp" class="teach-help"></p>
+        <button id="recordBtn" class="record">● Record</button>
+        <div class="meter"><div id="levelBar" class="meter-fill"></div></div>
+        <canvas id="chromaCanvas" class="chroma"></canvas>
+        <div id="testBox" class="test-box" hidden>
+          <div class="match-label">Match <span id="matchPct">0%</span></div>
+          <div class="meter match"><div id="matchBar" class="meter-fill"></div><div id="matchLine" class="meter-line"></div></div>
+          <div id="matchHit" class="match-hit">Would turn the page now ✓</div>
+        </div>
+        <div class="teach-actions">
+          <button id="testBtn" disabled>👂 Test</button>
+          <button id="forgetBtn" class="ghost danger" disabled>Forget this one</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- Viewer: full-screen pages -->
@@ -88,6 +124,7 @@
 
   <div id="toast" class="toast" hidden></div>
 
+  <script src="listen.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

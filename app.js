@@ -45,7 +45,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 // ---------------------------------------------------------------- helpers
 const $ = (id) => document.getElementById(id);
-const views = ['library', 'editor', 'crop', 'viewer'];
+const views = ['library', 'editor', 'crop', 'viewer', 'teach'];
 function show(view) {
   for (const v of views) $(v).hidden = v !== view;
   window.scrollTo(0, 0);
@@ -329,6 +329,7 @@ async function renderPages() {
   const ids = currentPiece.pageIds;
   $('emptyPieces').hidden = ids.length > 0;
   $('playBtn').disabled = ids.length === 0;
+  $('teachBtn').disabled = ids.length === 0;
   for (let i = 0; i < ids.length; i++) {
     const page = await dbGet('pages', ids[i]);
     if (!page) continue;
@@ -341,6 +342,11 @@ async function renderPages() {
     row.className = 'row';
     const label = document.createElement('span');
     label.textContent = i + 1;
+    if (page.cue) {
+      const t = document.createElement('span');
+      t.className = 'taught'; t.textContent = ' 🎹'; t.title = 'Page turn taught';
+      label.append(t);
+    }
     const mk = (txt, title, fn, disabled) => {
       const b = document.createElement('button');
       b.textContent = txt; b.title = title; b.setAttribute('aria-label', title);
@@ -430,7 +436,7 @@ async function nextCrop() {
     const img = await loadImage(file);
     // Keep a downsized original so the page can be re-cropped later.
     const original = await canvasToBlob(drawScaled(img, SOURCE_MAX), 'image/jpeg', 0.92);
-    await startCrop({ original, rotation: 0, corners: null, enhance: true, removeColor: true });
+    await startCrop({ original, rotation: 0, corners: null, enhance: false, removeColor: true });
   } catch (err) {
     console.error(err);
     toast('Could not open that photo');
@@ -442,7 +448,7 @@ async function recropPage(page) {
   cropQueue = [];
   await startCrop({
     pageId: page.id, original: page.original, rotation: page.rotation || 0,
-    corners: page.corners, enhance: page.enhance !== false, removeColor: page.removeColor !== false,
+    corners: page.corners, enhance: !!page.enhance, removeColor: page.removeColor !== false,
   });
 }
 
@@ -683,6 +689,7 @@ $('cropSave').onclick = async () => {
       blob, thumb, original: job.original,
       rotation: job.rotation, corners: job.corners, enhance: job.enhance, removeColor: job.removeColor,
       width: page.width, height: page.height,
+      cue: job.pageId ? ((await dbGet('pages', job.pageId)) || {}).cue : undefined,
     };
     await dbPut('pages', record);
     if (!job.pageId) currentPiece.pageIds.push(record.id);
@@ -707,6 +714,180 @@ function requestPersistence() {
   persistAsked = true;
   navigator.storage.persist().catch(() => {});
 }
+
+// ---------------------------------------------------------------- teach
+// For each page except the last, Enzo plays the last bar once. We save what the
+// microphone heard as a "cue", which the auto-turn will listen for while playing.
+const teach = {
+  pages: [], index: 0, url: null,
+  mode: 'idle',          // idle | recording | testing
+  frames: [], unsub: null, matcher: null, liveFrames: [],
+};
+const MATCH_THRESHOLD = 0.75;   // similarity needed to count as "heard the cue"
+
+async function openTeach() {
+  await savePiece();
+  teach.pages = [];
+  for (const id of currentPiece.pageIds) {
+    const p = await dbGet('pages', id);
+    if (p) teach.pages.push(p);
+  }
+  if (!teach.pages.length) return;
+  // Start at the first page that hasn't been taught yet.
+  const last = Math.max(0, teach.pages.length - 2);
+  const firstUntaught = teach.pages.findIndex((p, i) => i <= last && !p.cue);
+  teach.index = firstUntaught >= 0 ? firstUntaught : 0;
+  $('teachTitle').textContent = `Teach page turns: ${currentPiece.title || 'Untitled piece'}`;
+  $('matchLine').style.left = `${MATCH_THRESHOLD * 100}%`;
+  show('teach');
+  renderTeach();
+}
+
+function teachTurnCount() { return Math.max(1, teach.pages.length - 1); }
+
+function renderTeach() {
+  const i = teach.index, page = teach.pages[i];
+  const single = teach.pages.length === 1;
+  if (teach.url) URL.revokeObjectURL(teach.url);
+  teach.url = URL.createObjectURL(page.blob);
+  $('teachImg').src = teach.url;
+  $('teachImg').alt = `Page ${i + 1}`;
+  $('teachWhich').textContent = single ? 'Page 1' : `End of page ${i + 1} → ${i + 2}`;
+  const state = $('teachState');
+  state.textContent = page.cue ? 'Taught ✓' : 'Not taught yet';
+  state.classList.toggle('ok', !!page.cue);
+  $('teachHelp').innerHTML = single
+    ? 'This piece has only one page, so there is nothing to turn. Add more pages first.'
+    : `Tap <b>Record</b>, play the <b>last bar or two</b> of page ${i + 1} the way you normally would, then tap <b>Stop</b>. About 3 to 6 seconds is ideal.`;
+  $('teachPrev').disabled = i === 0;
+  $('teachNext').disabled = i >= teachTurnCount() - 1;
+  $('recordBtn').disabled = single;
+  $('testBtn').disabled = !page.cue;
+  $('forgetBtn').disabled = !page.cue;
+  $('testBox').hidden = true;
+  drawChroma($('chromaCanvas'), page.cue ? page.cue.frames : []);
+}
+
+function setRecordButton(label, stop) {
+  const b = $('recordBtn');
+  b.textContent = label;
+  b.classList.toggle('stop', !!stop);
+}
+
+async function ensureMic() {
+  try {
+    await Listener.start();
+    return true;
+  } catch (err) {
+    console.error(err);
+    const msg = err && err.name === 'NotAllowedError'
+      ? 'Microphone access was blocked. Allow it for this site in Chrome (or iPad Settings › Chrome › Microphone), then try again.'
+      : (err.message || 'Could not start the microphone');
+    toast(msg, 6000);
+    return false;
+  }
+}
+
+function stopListening() {
+  if (teach.unsub) teach.unsub();
+  teach.unsub = null;
+  teach.mode = 'idle';
+  setRecordButton('● Record');
+  $('testBtn').textContent = '👂 Test';
+  $('levelBar').style.width = '0';
+}
+
+function showLevel(f) {
+  // Map roughly -70..-10 dBFS onto the bar.
+  const pct = Math.max(0, Math.min(100, (f.level + 70) / 60 * 100));
+  $('levelBar').style.width = pct + '%';
+}
+
+$('recordBtn').onclick = async () => {
+  if (teach.mode === 'recording') return finishRecording();
+  if (teach.mode === 'testing') stopListening();
+  if (!(await ensureMic())) return;
+  teach.mode = 'recording';
+  teach.frames = [];
+  setRecordButton('■ Stop', true);
+  $('testBox').hidden = true;
+  $('teachState').textContent = 'Listening… play the last bar now';
+  $('teachState').classList.remove('ok');
+  teach.unsub = Listener.subscribe((f) => {
+    teach.frames.push(f);
+    showLevel(f);
+    drawChroma($('chromaCanvas'), teach.frames.map(x => (x.silent ? null : x.chroma)), { columns: 120 });
+    if (teach.frames.length * HOP_MS > 20000) finishRecording(); // stop by itself after 20 s
+  });
+};
+
+async function finishRecording() {
+  const frames = teach.frames;
+  stopListening();
+  const cue = makeCue(frames);
+  if (!cue) {
+    toast("I didn't hear enough. Check that the mic is allowed and play a little louder or longer.", 5000);
+    renderTeach();
+    return;
+  }
+  const page = teach.pages[teach.index];
+  page.cue = cue;
+  await dbPut('pages', page);
+  renderTeach();
+  toast(`Saved (${(cue.frames.length * cue.hop).toFixed(1)} s). Tap Test and play it again to check.`, 4000);
+}
+
+$('testBtn').onclick = async () => {
+  if (teach.mode === 'testing') return stopListening();
+  if (teach.mode === 'recording') return;
+  const page = teach.pages[teach.index];
+  if (!page.cue) return;
+  if (!(await ensureMic())) return;
+  teach.mode = 'testing';
+  teach.matcher = new CueMatcher(page.cue);
+  teach.liveFrames = [];
+  $('testBtn').textContent = '■ Stop test';
+  $('testBox').hidden = false;
+  let hitUntil = 0, peak = 0, peakAt = 0;
+  teach.unsub = Listener.subscribe((f) => {
+    showLevel(f);
+    const r = teach.matcher.push(f);
+    // Show the best score of the last second so the bar is readable.
+    if (r.similarity >= peak || f.t - peakAt > 1000) { peak = r.similarity; peakAt = f.t; }
+    $('matchBar').style.width = `${Math.round(peak * 100)}%`;
+    $('matchBar').style.background = peak >= MATCH_THRESHOLD ? '#2b8a3e' : '#868e96';
+    $('matchPct').textContent = `${Math.round(peak * 100)}%`;
+    if (r.similarity >= MATCH_THRESHOLD) hitUntil = f.t + 2000;
+    $('matchHit').classList.toggle('on', f.t < hitUntil);
+    teach.liveFrames.push(f.silent ? null : f.chroma);
+    if (teach.liveFrames.length > 120) teach.liveFrames.shift();
+  });
+};
+
+$('forgetBtn').onclick = async () => {
+  stopListening();
+  const page = teach.pages[teach.index];
+  delete page.cue;
+  await dbPut('pages', page);
+  renderTeach();
+};
+
+$('teachPrev').onclick = () => { stopListening(); teach.index = Math.max(0, teach.index - 1); renderTeach(); };
+$('teachNext').onclick = () => { stopListening(); teach.index = Math.min(teachTurnCount() - 1, teach.index + 1); renderTeach(); };
+$('teachBack').onclick = async () => {
+  stopListening();
+  Listener.stop();
+  if (teach.url) URL.revokeObjectURL(teach.url);
+  teach.url = null;
+  show('editor');
+  await renderPages();
+};
+$('teachBtn').onclick = () => openTeach();
+window.addEventListener('resize', () => {
+  if ($('teach').hidden) return;
+  const page = teach.pages[teach.index];
+  if (teach.mode === 'idle' && page) drawChroma($('chromaCanvas'), page.cue ? page.cue.frames : []);
+});
 
 // ---------------------------------------------------------------- viewer
 const viewer = {
