@@ -170,11 +170,13 @@ function warpQuad(src, quad, maxSide = 2000) {
 }
 
 // Make the paper white and the ink dark, removing uneven lighting and shadows.
-function enhance(canvas) {
-  const W = canvas.width, H = canvas.height;
-  // Estimate the paper brightness everywhere by shrinking the image a lot (ink is thin, so it mostly averages away).
+// Keeps grey tones so thin lines stay smooth, sharpens slightly, and (optionally)
+// erases marks in any color other than black, such as a teacher's red or blue pen.
+function enhance(canvas, removeColor = true) {
+  const W = canvas.width, H = canvas.height, N = W * H;
+  // Estimate the paper color everywhere by shrinking the image a lot (ink is thin, so it mostly averages away).
   let small = canvas, sw = W, sh = H;
-  while (sw > 64 || sh > 64) {
+  while (sw > 48 || sh > 48) {
     sw = Math.max(1, Math.round(sw / 2)); sh = Math.max(1, Math.round(sh / 2));
     const c = document.createElement('canvas');
     c.width = sw; c.height = sh;
@@ -194,15 +196,55 @@ function enhance(canvas) {
   const ctx = canvas.getContext('2d');
   const img = ctx.getImageData(0, 0, W, H);
   const d = img.data;
-  const lo = 0.5, hi = 0.88; // ratio below lo -> black, above hi -> white
-  for (let i = 0; i < d.length; i += 4) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    // Background ink dilutes the estimate a bit; lift it slightly.
-    const b = Math.max(24, (0.299 * bd[i] + 0.587 * bd[i + 1] + 0.114 * bd[i + 2]) * 1.04);
-    let r = (g / b - lo) / (hi - lo);
-    r = r < 0 ? 0 : r > 1 ? 1 : r;
-    const v = Math.round(255 * r * r * (3 - 2 * r)); // smoothstep keeps edges crisp but not jagged
-    d[i] = d[i + 1] = d[i + 2] = v;
+
+  // Brightness relative to the paper (1 = paper, 0 = black), and how colorful each pixel is.
+  const L = new Float32Array(N);
+  const C = new Float32Array(N);
+  for (let p = 0, i = 0; p < N; p++, i += 4) {
+    // Ink lowers the background estimate a little; lift it so clean paper lands at or above 1.
+    const r = d[i] / Math.max(20, bd[i] * 1.06);
+    const g = d[i + 1] / Math.max(20, bd[i + 1] * 1.06);
+    const b = d[i + 2] / Math.max(20, bd[i + 2] * 1.06);
+    L[p] = removeColor ? Math.max(r, g, b) : 0.299 * r + 0.587 * g + 0.114 * b;
+    C[p] = Math.max(r, g, b) - Math.min(r, g, b);
+  }
+
+  // Light unsharp mask (3x3) so camera softness doesn't read as blur.
+  const amount = 0.7;
+  const S = new Float32Array(N);
+  for (let y = 0; y < H; y++) {
+    const y0 = y > 0 ? y - 1 : 0, y1 = y < H - 1 ? y + 1 : H - 1;
+    for (let x = 0; x < W; x++) {
+      const x0 = x > 0 ? x - 1 : 0, x1 = x < W - 1 ? x + 1 : W - 1;
+      const blur = (L[y0 * W + x0] + L[y0 * W + x] + L[y0 * W + x1] +
+                    L[y * W + x0] + L[y * W + x] + L[y * W + x1] +
+                    L[y1 * W + x0] + L[y1 * W + x] + L[y1 * W + x1]) / 9;
+      const p = y * W + x;
+      S[p] = L[p] + amount * (L[p] - blur);
+    }
+  }
+
+  // Colored ink is bright in at least one color channel (red pen is bright in red, blue pen in blue),
+  // while black ink is dark in all of them. Using the brightest channel makes colored marks
+  // fade into the paper but keeps black notation, even where a colored mark crosses it.
+  let M = null;
+  if (removeColor) {
+    M = new Float32Array(N);
+    for (let p = 0; p < N; p++) {
+      // Dark but clearly colored ink (e.g. a dark blue ballpoint) still has some color: push it out too.
+      // Skip pixels that are dark in every channel: that's black print, maybe under a pen stroke.
+      const w = (C[p] - 0.18) / 0.15, dark = (L[p] - 0.4) / 0.15;
+      M[p] = (w < 0 ? 0 : w > 1 ? 1 : w) * (dark < 0 ? 0 : dark > 1 ? 1 : dark);
+    }
+  }
+
+  // Gentle tone curve: real ink goes black, paper goes white, edges keep their grey.
+  const lo = 0.28, hi = 0.9;
+  for (let p = 0, i = 0; p < N; p++, i += 4) {
+    let v = (S[p] - lo) / (hi - lo);
+    v = v < 0 ? 0 : v > 1 ? 1 : v;
+    if (M) v = v + (1 - v) * M[p]; // colored marks fade to paper
+    d[i] = d[i + 1] = d[i + 2] = Math.round(v * 255);
   }
   ctx.putImageData(img, 0, 0);
   return canvas;
@@ -378,8 +420,8 @@ $('cameraInput').addEventListener('change', onFiles);
 $('libraryInput').addEventListener('change', onFiles);
 
 // ---------------------------------------------------------------- crop
-const SOURCE_MAX = 2600;   // longest side kept for the original photo
-const PAGE_MAX = 2000;     // longest side of the straightened page
+const SOURCE_MAX = 4032;   // longest side kept for the original photo (full iPad camera resolution)
+const PAGE_MAX = 3000;     // longest side of the straightened page (sharper than the iPad screen)
 
 async function nextCrop() {
   const file = cropQueue.shift();
@@ -387,8 +429,8 @@ async function nextCrop() {
   try {
     const img = await loadImage(file);
     // Keep a downsized original so the page can be re-cropped later.
-    const original = await canvasToBlob(drawScaled(img, SOURCE_MAX), 'image/jpeg', 0.9);
-    await startCrop({ original, rotation: 0, corners: null, enhance: true });
+    const original = await canvasToBlob(drawScaled(img, SOURCE_MAX), 'image/jpeg', 0.92);
+    await startCrop({ original, rotation: 0, corners: null, enhance: true, removeColor: true });
   } catch (err) {
     console.error(err);
     toast('Could not open that photo');
@@ -400,7 +442,7 @@ async function recropPage(page) {
   cropQueue = [];
   await startCrop({
     pageId: page.id, original: page.original, rotation: page.rotation || 0,
-    corners: page.corners, enhance: page.enhance !== false,
+    corners: page.corners, enhance: page.enhance !== false, removeColor: page.removeColor !== false,
   });
 }
 
@@ -410,6 +452,8 @@ async function startCrop(job) {
   job.srcCanvas = drawScaled(job.img, SOURCE_MAX, job.rotation);
   if (!job.corners) job.corners = defaultCorners(job.srcCanvas);
   $('enhanceToggle').checked = job.enhance;
+  $('colorToggle').checked = job.removeColor;
+  $('colorToggle').disabled = !job.enhance;
   const left = cropQueue.length;
   $('cropHint').textContent = left
     ? `Drag the corners onto the page edges (${left} more after this)`
@@ -609,6 +653,7 @@ $('rotateBtn').onclick = () => {
   cropJob.corners = defaultCorners(cropJob.srcCanvas);
   drawCrop();
 };
+$('enhanceToggle').onchange = () => { $('colorToggle').disabled = !$('enhanceToggle').checked; };
 $('resetCornersBtn').onclick = () => {
   cropJob.corners = defaultCorners(cropJob.srcCanvas);
   drawCrop();
@@ -628,14 +673,15 @@ $('cropSave').onclick = async () => {
   await new Promise(r => requestAnimationFrame(() => setTimeout(r, 30)));
   try {
     job.enhance = $('enhanceToggle').checked;
+    job.removeColor = $('colorToggle').checked;
     const page = warpQuad(job.srcCanvas, job.corners, PAGE_MAX);
-    if (job.enhance) enhance(page);
-    const blob = await canvasToBlob(page, 'image/jpeg', 0.85);
+    if (job.enhance) enhance(page, job.removeColor);
+    const blob = await canvasToBlob(page, 'image/jpeg', 0.9);
     const thumb = await canvasToBlob(drawScaled(page, 400), 'image/jpeg', 0.8);
     const record = {
       id: job.pageId || uid(),
       blob, thumb, original: job.original,
-      rotation: job.rotation, corners: job.corners, enhance: job.enhance,
+      rotation: job.rotation, corners: job.corners, enhance: job.enhance, removeColor: job.removeColor,
       width: page.width, height: page.height,
     };
     await dbPut('pages', record);

@@ -67,7 +67,10 @@
     <footer class="bar">
       <button id="rotateBtn" class="ghost">⟳ Rotate</button>
       <button id="resetCornersBtn" class="ghost">Reset corners</button>
-      <label class="toggle"><input id="enhanceToggle" type="checkbox" checked> Clean up (white paper, black ink)</label>
+      <span class="toggles">
+        <label class="toggle"><input id="enhanceToggle" type="checkbox" checked> Clean up</label>
+        <label class="toggle"><input id="colorToggle" type="checkbox" checked> Remove colored marks</label>
+      </span>
     </footer>
     <div id="busy" class="busy" hidden><div class="spinner"></div><span>Straightening…</span></div>
   </section>
